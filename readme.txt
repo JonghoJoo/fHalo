@@ -1,48 +1,77 @@
-import gitlab
+import requests
 from collections import Counter
 import os
 
-# 1. GitLab 접속 정보 설정
-GITLAB_URL = 'https://gitlab.example.com' # 본인의 GitLab 주소
-PRIVATE_TOKEN = 'your_access_token'       # 개인 액세스 토큰 (API 권한 필요)
+# --- 설정 (본인의 정보로 수정하세요) ---
+GITLAB_URL = "https://gitlab.example.com"  # GitLab 서버 주소
+PRIVATE_TOKEN = "your_access_token"        # 액세스 토큰
+# ---------------------------------------
 
-gl = gitlab.Gitlab(GITLAB_URL, private_token=PRIVATE_TOKEN)
+headers = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
 
-def count_extensions():
+def get_all_extensions():
     extension_counts = Counter()
     
-    # 2. 모든 프로젝트 가져오기 (성능을 위해 get_all=True 사용)
-    projects = gl.projects.list(get_all=True)
-    print(f"Total projects found: {len(projects)}")
-
-    for project in projects:
-        try:
-            # 3. Repository Tree를 재귀적으로 조회 (파일 목록만 가져옴)
-            # recursive=True: 하위 디렉토리까지 모두 포함
-            # iterator=True: 메모리 효율을 위해 제너레이터 형태로 수신
-            items = project.repository_tree(recursive=True, all=True, iterator=True)
+    # 1. 모든 프로젝트 목록 가져오기 (페이지네이션 처리)
+    project_url = f"{GITLAB_URL}/api/v4/projects"
+    params = {"per_page": 100, "page": 1, "membership": True}
+    
+    while True:
+        response = requests.get(project_url, headers=headers, params=params)
+        if response.status_code != 200:
+            print(f"Error fetching projects: {response.status_code}")
+            break
             
-            for item in items:
-                # 'blob' 타입이 실제 파일임 (tree는 디렉토리)
-                if item['type'] == 'blob':
-                    filepath = item['path']
-                    _, ext = os.path.splitext(filepath)
-                    
-                    if ext:
-                        extension_counts[ext.lower()] += 1
-                    else:
-                        extension_counts['no_extension'] += 1
+        projects = response.json()
+        if not projects:
+            break
             
-            print(f"Processed: {project.path_with_namespace}")
+        for project in projects:
+            p_id = project['id']
+            p_name = project['path_with_namespace']
+            print(f"Scanning: {p_name}...")
             
-        except Exception as e:
-            print(f"Error processing {project.path_with_namespace}: {e}")
+            # 2. 각 프로젝트의 파일 트리 재귀적(recursive) 조회
+            # recursive=true: 모든 하위 폴더 포함
+            # pagination: 파일이 많은 경우를 대비해 처리
+            tree_url = f"{GITLAB_URL}/api/v4/projects/{p_id}/repository/tree"
+            tree_params = {"recursive": True, "per_page": 100, "page": 1}
+            
+            while True:
+                tree_res = requests.get(tree_url, headers=headers, params=tree_params)
+                if tree_res.status_code != 200:
+                    break
+                
+                items = tree_res.json()
+                if not items:
+                    break
+                
+                for item in items:
+                    # 'blob'은 파일을 의미함
+                    if item['type'] == 'blob':
+                        _, ext = os.path.splitext(item['path'])
+                        ext = ext.lower() if ext else "no_extension"
+                        extension_counts[ext] += 1
+                
+                # 다음 페이지 확인
+                if 'next' in tree_res.links:
+                    tree_params['page'] += 1
+                else:
+                    break
+        
+        # 다음 프로젝트 페이지 확인
+        if 'next' in response.links:
+            params['page'] += 1
+        else:
+            break
 
     return extension_counts
 
-# 결과 출력
-results = count_extensions()
-print("\n--- Extension Count Results ---")
-for ext, count in results.most_common():
-    print(f"{ext}: {count}")
+# 실행 및 결과 출력
+final_counts = get_all_extensions()
 
+print("\n" + "="*30)
+print(f"{'Extension':<15} | {'Count':<10}")
+print("-" * 30)
+for ext, count in final_counts.most_common():
+    print(f"{ext:<15} | {count:<10}")
